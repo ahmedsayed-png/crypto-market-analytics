@@ -1,0 +1,6 @@
+# Dockerfile placeholder for Spark Master node
+FROM bitnami/spark:3.5.0
+
+ENV SPARK_MODE=master
+
+EXPOSE 7077 8080

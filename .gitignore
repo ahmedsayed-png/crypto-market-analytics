@@ -1,0 +1,35 @@
+# Environment variables
+.env
+
+# Data files & local data directories
+data/
+*.csv
+*.parquet
+*.json
+
+# Airflow logs and runtime files
+airflow/logs/
+airflow/*.pid
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# IDE & OS files
+.DS_Store
+.vscode/
+.idea/
