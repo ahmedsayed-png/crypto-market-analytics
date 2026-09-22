@@ -1,5 +1,21 @@
+# ==============================================================================
 # Python dependencies for Binance REST API & WebSocket Kafka Producers
+# ==============================================================================
+
+# Kafka producer client
 kafka-python>=2.0.2
+
+# Binance REST API HTTP client
 requests>=2.31.0
+
+# WebSocket client for Binance streaming
 websocket-client>=1.6.1
+
+# Environment variable loading
 python-dotenv>=1.0.0
+
+# Structured logging
+python-json-logger>=2.0.7
+
+# Retry logic
+tenacity>=8.2.3

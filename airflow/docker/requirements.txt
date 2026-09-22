@@ -1,0 +1,6 @@
+pyspark==3.3.0
+hdfs==2.7.3
+kafka-python==2.0.2
+requests==2.31.0
+websocket-client==1.6.1
+apache-airflow-providers-apache-spark==4.9.0

@@ -1,0 +1,336 @@
+name: crypto-market-analytics
+
+x-airflow-common-env: &airflow-common-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+  AIRFLOW__CORE__FERNET_KEY: ""
+  AIRFLOW__WEBSERVER__SECRET_KEY: "crypto-airflow-secret-key-change-me"
+  HDFS_NAMENODE: "hdfs://namenode:9000"
+  SPARK_MASTER: "spark://spark-master:7077"
+  KAFKA_BOOTSTRAP: "kafka:9092"
+
+networks:
+  crypto-net:
+    name: crypto-net
+
+volumes:
+  namenode_data:
+  datanode_data:
+  postgres_data:
+  kafka_data:
+  postgres_dw_data:
+  superset_home:
+
+services:
+  # -------------------------------------------------------------------------
+  # HDFS Layer
+  # -------------------------------------------------------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:${HADOOP_IMAGE_TAG}
+    container_name: namenode
+    hostname: namenode
+    restart: unless-stopped
+    env_file: ./hadoop/hadoop.env
+    environment:
+      - CLUSTER_NAME=crypto-analytics
+    ports:
+      - "${NAMENODE_UI_PORT}:9870"
+      - "${HDFS_RPC_PORT}:9000"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks: [crypto-net]
+
+  datanode:
+    image: bde2020/hadoop-datanode:${HADOOP_IMAGE_TAG}
+    container_name: datanode
+    hostname: datanode
+    restart: unless-stopped
+    depends_on: [namenode]
+    env_file: ./hadoop/hadoop.env
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "${DATANODE_UI_PORT}:9864"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # Spark Cluster (1 Master + 1 Worker)
+  # -------------------------------------------------------------------------
+  spark-master:
+    image: bde2020/spark-master:${SPARK_IMAGE_TAG}
+    container_name: spark-master
+    hostname: spark-master
+    restart: unless-stopped
+    environment:
+      - INIT_DAEMON_STEP=setup_spark
+    ports:
+      - "${SPARK_MASTER_UI_PORT}:8080"
+      - "${SPARK_MASTER_PORT}:7077"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+    networks: [crypto-net]
+
+  spark-worker:
+    image: bde2020/spark-worker:${SPARK_IMAGE_TAG}
+    container_name: spark-worker
+    hostname: spark-worker
+    restart: unless-stopped
+    depends_on: [spark-master]
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=3G
+      - SPARK_WORKER_CORES=2
+    ports:
+      - "${SPARK_WORKER_UI_PORT}:8081"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+    networks: [crypto-net]
+
+  jupyter:
+    build:
+      context: ./jupyter
+      args:
+        PYSPARK_VERSION: ${PYSPARK_VERSION}
+    image: crypto-jupyter:local
+    container_name: jupyter
+    hostname: jupyter
+    restart: unless-stopped
+    depends_on: [spark-master, namenode, kafka]
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=lab
+    ports:
+      - "${JUPYTER_PORT}:8888"
+    volumes:
+      - ./jupyter/notebooks:/home/jovyan/work
+      - ./spark/apps:/home/jovyan/work/spark-apps
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # Kafka Ingestion Layer (KRaft mode) + Kafka UI
+  # -------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:${KAFKA_IMAGE_TAG}
+    container_name: kafka
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - CLUSTER_ID=crypto-analytics-kraft-cluster-01
+    ports:
+      - "${KAFKA_INTERNAL_PORT}:9092"
+      - "${KAFKA_EXTERNAL_PORT}:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks: [crypto-net]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:${KAFKA_UI_IMAGE_TAG}
+    container_name: kafka-ui
+    hostname: kafka-ui
+    restart: unless-stopped
+    depends_on: [kafka]
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=crypto-analytics
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    networks: [crypto-net]
+
+  kafka-topics-init:
+    image: apache/kafka:${KAFKA_IMAGE_TAG}
+    container_name: kafka-topics-init
+    restart: "no"
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "/scripts/create_topics.sh"]
+    volumes:
+      - ./kafka/create_topics.sh:/scripts/create_topics.sh:ro
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # Binance Producer Service
+  # -------------------------------------------------------------------------
+  producer:
+    build:
+      context: ./producer
+    image: crypto-producer:local
+    container_name: crypto-producer
+    hostname: crypto-producer
+    restart: unless-stopped
+    depends_on:
+      kafka-topics-init:
+        condition: service_completed_successfully
+    environment:
+      - RUN_MODE=${RUN_MODE:-streaming}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
+      - KAFKA_TOPIC_TRADES=${KAFKA_TOPIC_TRADES}
+      - KAFKA_TOPIC_KLINES=${KAFKA_TOPIC_KLINES}
+      - KAFKA_TOPIC_ORDER_BOOK=${KAFKA_TOPIC_ORDER_BOOK}
+      - KAFKA_TOPIC_TICKER=${KAFKA_TOPIC_TICKER}
+      - KAFKA_TOPIC_ALERTS=${KAFKA_TOPIC_ALERTS}
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+      - BINANCE_BASE_URL=${BINANCE_BASE_URL}
+      - BINANCE_WS_URL=${BINANCE_WS_URL}
+    volumes:
+      - ./producer:/app
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # Airflow Orchestration Engine
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_IMAGE_TAG}
+    container_name: airflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [crypto-net]
+
+  airflow-init:
+    build:
+      context: ./airflow/docker
+      args:
+        AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE}
+    image: crypto-airflow:local
+    container_name: airflow-init
+    depends_on: [postgres]
+    environment:
+      <<: *airflow-common-env
+    entrypoint: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
+      "
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [crypto-net]
+
+  airflow-webserver:
+    build:
+      context: ./airflow/docker
+      args:
+        AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE}
+    image: crypto-airflow:local
+    container_name: airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *airflow-common-env
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT}:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [crypto-net]
+
+  airflow-scheduler:
+    build:
+      context: ./airflow/docker
+      args:
+        AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE}
+    image: crypto-airflow:local
+    container_name: airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *airflow-common-env
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # PostgreSQL Data Warehouse (Crypto Analytics Serving DB)
+  # -------------------------------------------------------------------------
+  postgres-dw:
+    image: postgres:${POSTGRES_IMAGE_TAG}
+    container_name: postgres-dw
+    hostname: postgres-dw
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_DW_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DW_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DW_DB}
+    ports:
+      - "${POSTGRES_DW_PORT}:5432"
+    volumes:
+      - postgres_dw_data:/var/lib/postgresql/data
+      - ./postgres-dw/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [crypto-net]
+
+  # -------------------------------------------------------------------------
+  # Apache Superset Visualization Engine
+  # -------------------------------------------------------------------------
+  superset:
+    build:
+      context: ./superset
+      args:
+        SUPERSET_IMAGE_TAG: ${SUPERSET_IMAGE_TAG}
+    image: crypto-superset:local
+    container_name: superset
+    hostname: superset
+    restart: unless-stopped
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+    ports:
+      - "${SUPERSET_PORT}:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    networks: [crypto-net]
+
+  superset-init:
+    build:
+      context: ./superset
+      args:
+        SUPERSET_IMAGE_TAG: ${SUPERSET_IMAGE_TAG}
+    image: crypto-superset:local
+    container_name: superset-init
+    depends_on: [postgres-dw]
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+      - SUPERSET_ADMIN_USER=${SUPERSET_ADMIN_USER}
+      - SUPERSET_ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD}
+      - SUPERSET_ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL}
+      - POSTGRES_DW_DB=${POSTGRES_DW_DB}
+      - POSTGRES_DW_USER=${POSTGRES_DW_USER}
+      - POSTGRES_DW_PASSWORD=${POSTGRES_DW_PASSWORD}
+    entrypoint: ["/bin/bash", "/app/bootstrap.sh"]
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/bootstrap.sh:/app/bootstrap.sh:ro
+    networks: [crypto-net]

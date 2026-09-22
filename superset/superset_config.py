@@ -1,4 +1,4 @@
-# Apache Superset Configuration Placeholder
+# Apache Superset Configuration
 import os
 
 FEATURE_FLAGS = {
@@ -6,4 +6,4 @@ FEATURE_FLAGS = {
 }
 
 ENABLE_PROXY_FIX = True
-SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
+SECRET_KEY = os.environ.get("SUPERSET_SECRET_KEY", "crypto-market-analytics-superset-secret-key-2026")
