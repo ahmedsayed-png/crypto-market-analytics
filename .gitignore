@@ -29,6 +29,11 @@ env/
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
 
+# Temporary & backup files
+*.bak
+*.audit_backup
+*.pre_task_fix
+
 # IDE & OS files
 .DS_Store
 .vscode/

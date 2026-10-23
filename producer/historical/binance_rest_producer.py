@@ -67,10 +67,10 @@ class BinanceRestClient:
 
     def __init__(self) -> None:
         self._session = requests.Session()
-        self._session.headers.update({
-            "X-MBX-APIKEY": CONFIG.binance.api_key,
-            "Content-Type": "application/json",
-        })
+        headers = {"Content-Type": "application/json"}
+        if CONFIG.binance.api_key and CONFIG.binance.api_key != "your_binance_api_key_here":
+            headers["X-MBX-APIKEY"] = CONFIG.binance.api_key
+        self._session.headers.update(headers)
         self._base_url = CONFIG.binance.base_url
         self._pause = CONFIG.binance.rate_limit_pause_seconds
 

@@ -11,6 +11,11 @@ x-airflow-common-env: &airflow-common-env
   HDFS_NAMENODE: "hdfs://namenode:9000"
   SPARK_MASTER: "spark://spark-master:7077"
   KAFKA_BOOTSTRAP: "kafka:9092"
+  POSTGRES_DW_HOST: "postgres-dw"
+  POSTGRES_DW_PORT: "5432"
+  POSTGRES_DW_DB: "crypto_dw"
+  POSTGRES_DW_USER: "crypto_admin"
+  POSTGRES_DW_PASSWORD: "${POSTGRES_DW_PASSWORD:-crypto_secure_password_123}"
 
 networks:
   crypto-net:
@@ -229,6 +234,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./spark/apps:/opt/spark-apps:ro
     networks: [crypto-net]
 
   airflow-webserver:
@@ -251,6 +257,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./spark/apps:/opt/spark-apps:ro
     networks: [crypto-net]
 
   airflow-scheduler:
@@ -271,6 +278,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./spark/apps:/opt/spark-apps:ro
     networks: [crypto-net]
 
   # -------------------------------------------------------------------------
