@@ -235,13 +235,14 @@ def ingest_klines(
 ) -> None:
     """
     Paginate through the full history window for *symbol* and push
-    normalised kline records to the ``market_klines`` Kafka topic.
+    normalised kline records to the ``crypto_klines_historical`` Kafka topic.
     """
     cfg = CONFIG.historical
     total_sent = 0
+    batches_processed = 0
 
     topic = CONFIG.kafka.topic_historical_klines
-    logger.info("[%s] Starting kline ingestion to topic '%s' (lookback=%dd)", symbol, topic, cfg.lookback_days)
+    logger.info("[%s] Starting kline ingestion to topic '%s' (lookback=%dd, max_batches=%s)", symbol, topic, cfg.lookback_days, cfg.max_batches)
 
     for start_ms, end_ms in kline_time_windows(
         lookback_days=cfg.lookback_days,
@@ -268,9 +269,14 @@ def ingest_klines(
             if sent:
                 total_sent += 1
 
-        logger.debug("[%s] Sent %d klines (window end: %d)", symbol, total_sent, end_ms)
+        batches_processed += 1
+        logger.debug("[%s] Sent %d klines (batch %d, window end: %d)", symbol, total_sent, batches_processed, end_ms)
 
-    logger.info("[%s] Kline ingestion complete — %d records", symbol, total_sent)
+        if cfg.max_batches and batches_processed >= cfg.max_batches:
+            logger.info("[%s] Reached maximum requested batches (%d), stopping symbol ingestion.", symbol, cfg.max_batches)
+            break
+
+    logger.info("[%s] Kline ingestion complete — %d records across %d batch(es)", symbol, total_sent, batches_processed)
 
 
 def ingest_trades(

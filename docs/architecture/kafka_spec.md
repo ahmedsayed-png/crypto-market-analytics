@@ -139,37 +139,65 @@ Producers use the centralized client in `producer/kafka_client.py` configured wi
 
 ---
 
-## 6. Operational & Diagnostic Commands
+## 6. Operational, Ingestion & Diagnostic Commands
 
-### 1. Provision / Refresh Topics
+### 1. Diagnostic Tools (`kafka/tools.py`)
+Run all diagnostic commands inside the container environment (`crypto-producer:local`) to ensure all dependencies (`kafka-python`) are present without host contamination:
+
 ```bash
-# Via Docker Compose
-docker compose run --rm kafka-topics-init
+# Display Diagnostic Help
+docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
+    python kafka/tools.py --help
 
-# Or directly on host if connected
-bash kafka/create_topics.sh
+# Inspect Topics and Partition Offsets (Without Publishing)
+docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
+    python kafka/tools.py inspect-topics --topics crypto_klines_historical crypto_klines_streaming
+
+# Inspect Active Consumer Groups
+docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
+    python kafka/tools.py inspect-groups
 ```
 
-### 2. Inspect Topics, Offsets, and Configurations
+### 2. Manual Binance-to-Kafka Historical Ingestion
+
+#### A. Safe Small Test Ingestion (1 Symbol, 1 Batch of ~1000 Klines)
+Run a controlled test ingestion that fetches only 1 batch (~16 hours of 1-minute candles) for `BTCUSDT` without modifying production config files:
 ```bash
 docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
-    python kafka/tools.py --bootstrap kafka:9092 inspect-topics --topics crypto_klines_historical crypto_klines_streaming
+    env FORCE_RUN=true \
+        HISTORICAL_SYMBOLS=BTCUSDT \
+        HISTORICAL_LOOKBACK_DAYS=1 \
+        HISTORICAL_MAX_BATCHES=1 \
+        python producer/historical/binance_rest_producer.py
 ```
 
-### 3. Non-Destructive Consumer Smoke Test
-```bash
-# Read from crypto_klines_historical without resetting production offsets
-docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
-    python kafka/tools.py --bootstrap kafka:9092 consume-test --topic crypto_klines_historical --from-beginning --max 5
-```
-
-### 4. Publish a Validated Test Message
+#### B. Full Historical Backfill Ingestion (All 20 Configured Symbols, 365 Days)
+Execute the complete historical backfill when ready:
 ```bash
 docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
-    python kafka/tools.py --bootstrap kafka:9092 publish-test --topic crypto_klines_streaming --symbol SOLUSDT --source realtime
+    env FORCE_RUN=true \
+        HISTORICAL_LOOKBACK_DAYS=365 \
+        python producer/historical/binance_rest_producer.py
 ```
 
-### 5. Run Automated Unit Tests
+#### C. Monitoring & Verification
+```bash
+# Monitor Kafka topic offsets and total message counts
+docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
+    python kafka/tools.py inspect-topics --topics crypto_klines_historical
+
+# Open Kafka UI in browser
+# http://localhost:8090
+```
+
+### 3. Non-Destructive Consumer Smoke Test (Optional Verification)
+```bash
+# Read up to 5 messages from beginning of historical topic without affecting downstream Spark offsets:
+docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local \
+    python kafka/tools.py consume-test --topic crypto_klines_historical --from-beginning --max 5
+```
+
+### 4. Run Automated Unit Tests
 ```bash
 docker run --rm -v $(pwd):/app -w /app crypto-producer:local \
     python -m unittest discover -s tests -p "test_*.py"

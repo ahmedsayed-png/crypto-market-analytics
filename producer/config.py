@@ -10,7 +10,7 @@ be used in every environment (local, staging, production) without rebuilding.
 
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -86,19 +86,33 @@ class BinanceConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class HistoricalConfig:
-    # Target trading pairs (subset; extend list freely)
-    symbols: List[str] = field(default_factory=lambda: [
-        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-        "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
-        "LTCUSDT", "TRXUSDT", "SHIBUSDT", "ATOMUSDT", "UNIUSDT",
-        "ETCUSDT", "FILUSDT", "APTUSDT", "NEARUSDT", "MATICUSDT",
-    ])
+    # Target trading pairs (subset; extend list freely or override via HISTORICAL_SYMBOLS env var)
+    symbols: List[str] = field(default_factory=lambda: (
+        [s.strip().upper() for s in os.environ.get("HISTORICAL_SYMBOLS").split(",") if s.strip()]
+        if os.environ.get("HISTORICAL_SYMBOLS")
+        else [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+            "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+            "LTCUSDT", "TRXUSDT", "SHIBUSDT", "ATOMUSDT", "UNIUSDT",
+            "ETCUSDT", "FILUSDT", "APTUSDT", "NEARUSDT", "MATICUSDT",
+        ]
+    ))
     # Kline interval — 1m gives the finest granularity
-    kline_interval: str = "1m"
+    kline_interval: str = field(
+        default_factory=lambda: os.environ.get("HISTORICAL_KLINE_INTERVAL", "1m")
+    )
     # How many klines per REST request (Binance max = 1000)
-    klines_per_request: int = 1000
-    # Lookback window expressed as days of history
-    lookback_days: int = 365
+    klines_per_request: int = field(
+        default_factory=lambda: int(os.environ.get("HISTORICAL_KLINES_PER_REQUEST", "1000"))
+    )
+    # Lookback window expressed as days of history (override via HISTORICAL_LOOKBACK_DAYS)
+    lookback_days: int = field(
+        default_factory=lambda: int(os.environ.get("HISTORICAL_LOOKBACK_DAYS", "365"))
+    )
+    # Optional max batches limit per symbol (useful for safe small test runs)
+    max_batches: Optional[int] = field(
+        default_factory=lambda: int(os.environ["HISTORICAL_MAX_BATCHES"]) if os.environ.get("HISTORICAL_MAX_BATCHES") else None
+    )
     # data_source tag attached to every produced message
     data_source: str = "historical"
 
