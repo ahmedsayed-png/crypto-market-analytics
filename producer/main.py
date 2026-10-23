@@ -29,6 +29,9 @@ logger = logging.getLogger("producer.main")
 
 
 def _check_dry_run() -> bool:
+    force_run = os.environ.get("FORCE_RUN", "false").lower() in ("true", "1", "yes")
+    if force_run:
+        return False
     api_key = os.environ.get("BINANCE_API_KEY", "")
     return not api_key or api_key == "your_binance_api_key_here"
 

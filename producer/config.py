@@ -21,7 +21,13 @@ class KafkaConfig:
     bootstrap_servers: str = field(
         default_factory=lambda: os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     )
-    # Topic names — must match the 5 proposal topics created by kafka-topics-init
+    # Topic names — primary dedicated Kline topics + proposal supplementary topics
+    topic_historical_klines: str = field(
+        default_factory=lambda: os.environ.get("KAFKA_TOPIC_HISTORICAL_KLINES", "crypto_klines_historical")
+    )
+    topic_streaming_klines: str = field(
+        default_factory=lambda: os.environ.get("KAFKA_TOPIC_STREAMING_KLINES", "crypto_klines_streaming")
+    )
     topic_trades: str = field(
         default_factory=lambda: os.environ.get("KAFKA_TOPIC_TRADES", "market_trades")
     )

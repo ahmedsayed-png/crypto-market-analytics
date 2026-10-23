@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from config import CONFIG
 from kafka_client import get_kafka_producer
+from schema import normalise_ws_kline, validate_kline_dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,25 +101,8 @@ def normalise_agg_trade(data: Dict) -> Optional[Dict]:
 
 
 def normalise_kline(data: Dict) -> Optional[Dict]:
-    """@kline_<interval> stream → market_klines topic."""
-    k = data.get("k", {})
-    symbol = data.get("s", "")
-    return {
-        **_base_metadata(symbol),
-        "kline_start_time": k.get("t"),
-        "kline_close_time": k.get("T"),
-        "interval": k.get("i"),
-        "open": float(k.get("o", 0)),
-        "high": float(k.get("h", 0)),
-        "low": float(k.get("l", 0)),
-        "close": float(k.get("c", 0)),
-        "volume": float(k.get("v", 0)),
-        "number_of_trades": int(k.get("n", 0)),
-        "is_closed": k.get("x", False),
-        "quote_asset_volume": float(k.get("q", 0)),
-        "taker_buy_base_volume": float(k.get("V", 0)),
-        "taker_buy_quote_volume": float(k.get("Q", 0)),
-    }
+    """@kline_<interval> stream → canonical crypto_klines_streaming format."""
+    return normalise_ws_kline(data)
 
 
 def normalise_depth(data: Dict, symbol: str) -> Optional[Dict]:
@@ -207,9 +191,10 @@ class StreamRouter:
         msg = normalise_kline(data)
         if msg:
             self._producer.send_message(
-                topic=CONFIG.kafka.topic_klines,
+                topic=CONFIG.kafka.topic_streaming_klines,
                 payload=msg,
                 key=msg.get("symbol"),
+                validate=True,
             )
 
     def _handle_depth(self, data: Dict, symbol: str) -> None:
@@ -338,16 +323,14 @@ class BinanceWebSocketProducer:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    dry_run = (
-        not CONFIG.binance.api_key
-        or CONFIG.binance.api_key == "your_binance_api_key_here"
-    )
-    if dry_run:
+    force_run = os.environ.get("FORCE_RUN", "false").lower() in ("true", "1", "yes")
+    has_custom_key = CONFIG.binance.api_key and CONFIG.binance.api_key != "your_binance_api_key_here"
+
+    if not has_custom_key and not force_run:
         logger.warning(
             "DRY RUN MODE — BINANCE_API_KEY is not set. "
-            "No WebSocket connection will be opened. "
-            "Set BINANCE_API_KEY (and optionally BINANCE_API_SECRET) in .env "
-            "to start real-time streaming."
+            "To test public market WebSocket streams without an API key, set FORCE_RUN=true. "
+            "Set BINANCE_API_KEY in .env for authenticated requests."
         )
     else:
         ws_producer = BinanceWebSocketProducer()

@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from config import CONFIG
 from kafka_client import get_kafka_producer
+from schema import normalise_rest_kline, validate_kline_dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,36 +152,10 @@ def _base_metadata(symbol: str, data_source: str = "historical") -> Dict:
 
 def normalise_kline(raw: List, symbol: str) -> Dict:
     """
-    Convert a raw Binance kline array to a structured dict.
-
-    Binance kline array index mapping:
-      0  open_time           (ms)
-      1  open
-      2  high
-      3  low
-      4  close
-      5  volume
-      6  close_time          (ms)
-      7  quote_asset_volume
-      8  number_of_trades
-      9  taker_buy_base_vol
-     10  taker_buy_quote_vol
-     11  ignore
+    Convert a raw Binance kline array to a structured dict using the canonical schema.
+    Delegates to schema.normalise_rest_kline.
     """
-    return {
-        **_base_metadata(symbol),
-        "open_time": raw[0],
-        "open": float(raw[1]),
-        "high": float(raw[2]),
-        "low": float(raw[3]),
-        "close": float(raw[4]),
-        "volume": float(raw[5]),
-        "close_time": raw[6],
-        "quote_asset_volume": float(raw[7]),
-        "number_of_trades": int(raw[8]),
-        "taker_buy_base_volume": float(raw[9]),
-        "taker_buy_quote_volume": float(raw[10]),
-    }
+    return normalise_rest_kline(raw, symbol)
 
 
 def normalise_trade(raw: Dict, symbol: str) -> Dict:
@@ -265,7 +240,8 @@ def ingest_klines(
     cfg = CONFIG.historical
     total_sent = 0
 
-    logger.info("[%s] Starting kline ingestion (lookback=%dd)", symbol, cfg.lookback_days)
+    topic = CONFIG.kafka.topic_historical_klines
+    logger.info("[%s] Starting kline ingestion to topic '%s' (lookback=%dd)", symbol, topic, cfg.lookback_days)
 
     for start_ms, end_ms in kline_time_windows(
         lookback_days=cfg.lookback_days,
@@ -283,12 +259,14 @@ def ingest_klines(
 
         for raw in raw_klines:
             msg = normalise_kline(raw, symbol)
-            producer.send_message(
-                topic=CONFIG.kafka.topic_klines,
+            sent = producer.send_message(
+                topic=topic,
                 payload=msg,
                 key=symbol,
+                validate=True,
             )
-            total_sent += 1
+            if sent:
+                total_sent += 1
 
         logger.debug("[%s] Sent %d klines (window end: %d)", symbol, total_sent, end_ms)
 
@@ -387,12 +365,14 @@ def run_historical_ingestion() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    dry_run = not CONFIG.binance.api_key or CONFIG.binance.api_key == "your_binance_api_key_here"
-    if dry_run:
+    force_run = os.environ.get("FORCE_RUN", "false").lower() in ("true", "1", "yes")
+    has_custom_key = CONFIG.binance.api_key and CONFIG.binance.api_key != "your_binance_api_key_here"
+    
+    if not has_custom_key and not force_run:
         logger.warning(
             "DRY RUN MODE — BINANCE_API_KEY is not set. "
-            "No API calls will be made. "
-            "Set BINANCE_API_KEY in .env to start real ingestion."
+            "To test public market endpoints without an API key, set FORCE_RUN=true. "
+            "Set BINANCE_API_KEY in .env for authenticated requests."
         )
     else:
         run_historical_ingestion()

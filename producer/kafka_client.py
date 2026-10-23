@@ -1,7 +1,8 @@
 """
 ==============================================================================
 producer/kafka_client.py
-Thread-safe, singleton Kafka producer wrapper.
+Thread-safe, singleton Kafka producer wrapper with schema validation,
+configurable retry callbacks, and metrics tracking.
 
 Usage
 -----
@@ -20,6 +21,7 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
 from config import CONFIG
+from schema import validate_kline_dict
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,8 @@ _lock = threading.Lock()
 
 class CryptoKafkaProducer:
     """
-    Wraps kafka-python's KafkaProducer and exposes a simple
-    ``send_message(topic, payload, key)`` interface used by both the
-    historical and the real-time ingestion paths.
+    Wraps kafka-python's KafkaProducer and exposes a robust
+    ``send_message(topic, payload, key, validate_schema)`` interface.
     """
 
     def __init__(self) -> None:
@@ -43,12 +44,17 @@ class CryptoKafkaProducer:
             retry_backoff_ms=cfg.retry_backoff_ms,
             linger_ms=cfg.linger_ms,
             batch_size=cfg.batch_size,
-            # Serialize keys and values to UTF-8 JSON bytes
-            key_serializer=lambda k: k.encode("utf-8") if k else None,
+            key_serializer=lambda k: k.encode("utf-8") if isinstance(k, str) else k,
             value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
         )
+        self.sent_count = 0
+        self.error_count = 0
+        self.validation_failure_count = 0
         logger.info(
-            "KafkaProducer connected to %s", cfg.bootstrap_servers
+            "CryptoKafkaProducer connected to bootstrap_servers=%s (acks=%s, retries=%d)",
+            cfg.bootstrap_servers,
+            cfg.acks,
+            cfg.retries,
         )
 
     # ------------------------------------------------------------------
@@ -60,32 +66,55 @@ class CryptoKafkaProducer:
         topic: str,
         payload: Dict[str, Any],
         key: Optional[str] = None,
-    ) -> None:
+        validate: bool = False,
+    ) -> bool:
         """
         Asynchronously send *payload* to *topic*.
-        On delivery error, the error is logged — the pipeline is designed
-        to be idempotent so occasional drops are acceptable.
+        If validate is True, validates against the canonical Kline schema before send.
+        Returns True if sent/enqueued, False if rejected by schema validation.
         """
-        future = self._producer.send(topic, value=payload, key=key)
-        future.add_errback(self._on_send_error, topic=topic)
+        if validate:
+            is_valid, reason = validate_kline_dict(payload)
+            if not is_valid:
+                self.validation_failure_count += 1
+                logger.error(
+                    "Schema validation failed for record on topic '%s' (key=%s): %s. Record: %s",
+                    topic,
+                    key,
+                    reason,
+                    payload,
+                )
+                return False
 
-    def flush(self) -> None:
+        try:
+            future = self._producer.send(topic, value=payload, key=key)
+            future.add_errback(self._on_send_error, topic=topic, key=key)
+            self.sent_count += 1
+            return True
+        except KafkaError as exc:
+            self.error_count += 1
+            logger.error("Failed to enqueue message to topic '%s': %s", topic, exc)
+            return False
+
+    def flush(self, timeout: Optional[float] = None) -> None:
         """Block until all pending messages are delivered."""
-        self._producer.flush()
+        self._producer.flush(timeout=timeout)
 
-    def close(self) -> None:
-        """Gracefully shut down the underlying Kafka producer."""
-        self._producer.flush()
-        self._producer.close()
-        logger.info("KafkaProducer closed.")
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Gracefully flush and close the underlying Kafka producer."""
+        try:
+            self._producer.flush(timeout=timeout)
+        finally:
+            self._producer.close(timeout=timeout)
+            logger.info("CryptoKafkaProducer cleanly closed. Total sent: %d, errors: %d", self.sent_count, self.error_count)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _on_send_error(exc: KafkaError, topic: str = "") -> None:
-        logger.error("Failed to deliver message to topic '%s': %s", topic, exc)
+    def _on_send_error(self, exc: Exception, topic: str = "", key: Optional[str] = None) -> None:
+        self.error_count += 1
+        logger.error("Asynchronous delivery error to topic '%s' (key=%s): %s", topic, key, exc)
 
 
 # ---------------------------------------------------------------------------
