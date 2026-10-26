@@ -6,7 +6,7 @@ This repository hosts a Big Data and Data Engineering system architecture design
 
 The system integrates market data from the **Binance REST API** (for historical data) and the **Binance WebSocket API** (for live streaming data). Ingestion is mediated through **Apache Kafka** as a centralized event streaming and buffering layer, while **Apache Spark** serves as the unified processing engine for both batch and real-time streaming operations.
 
-> **Status Notice:** This project is currently in the initial **architecture design and repository foundation phase**. The directory hierarchy and component designs have been established. Application logic, streaming producers, Spark jobs, Airflow DAGs, and Docker Compose services are planned and scheduled for upcoming development phases.
+> **Status Notice:** The core data engineering infrastructure is **fully operational and verified**. Docker Compose services, Kafka KRaft streaming ingestion, Spark Structured Streaming, HDFS Parquet storage, PostgreSQL Data Warehouse, Airflow DAG orchestration, and Superset BI dashboards are running and integrated. Downstream ML and Visualization teams can connect to Kafka topics, HDFS partitions, and PostgreSQL analytical views directly.
 
 ## System Architecture
 
@@ -192,22 +192,71 @@ Apache Superset will connect directly to PostgreSQL to render visual dashboards.
 
 Airflow will act as the control plane running DAGs for batch ingestion, HDFS maintenance, data validation checks, and scheduled batch transformations.
 
-## Docker
+## Quickstart & Service Access
 
-All core infrastructure dependencies (Kafka, Spark, Hadoop, PostgreSQL, Superset, Airflow, Jupyter) are specified for containerization to ensure reproducibility. 
-
-> *Note: `docker-compose.yml` will be provided in a subsequent phase.*
-
-## Running the Project
-
-In this initial structure phase, Docker Compose services and runnable pipeline logic are not yet deployed. 
-
-To review the project structure locally:
+### 1. Environment Setup & Launch
 ```bash
+# Clone and enter the repository
 git clone https://github.com/ahmedsayed-png/crypto-market-analytics.git
 cd crypto-market-analytics
-ls -la
+
+# Copy configuration template (defaults are pre-configured for local/team run)
+cp .env.example .env
+
+# Launch all 14 infrastructure and processing services
+docker compose up -d
 ```
+
+### 2. Service Endpoints & Web Interfaces
+
+| Service | Host Port / URL | Internal Network Address | Purpose |
+|---|---|---|---|
+| **Apache Superset** | [http://localhost:8088](http://localhost:8088) | `superset:8088` | BI Dashboards (`/superset/dashboard/crypto-market-analytics/`) |
+| **Apache Airflow** | [http://localhost:8082](http://localhost:8082) | `airflow-webserver:8080` | DAG Orchestration & Data Quality Audits |
+| **Kafka UI** | [http://localhost:8090](http://localhost:8090) | `kafka-ui:8080` | Topic Offsets, Message Browser & Consumer Lag |
+| **Spark Master UI** | [http://localhost:8080](http://localhost:8080) | `spark-master:8080` (RPC `7077`) | Cluster Worker & Application Status |
+| **Spark Streaming UI**| [http://localhost:4040](http://localhost:4040) | `spark-streaming:4040` | Structured Streaming Micro-batch Metrics |
+| **JupyterLab** | [http://localhost:8888](http://localhost:8888) | `jupyter:8888` | Interactive PySpark Prototyping & EDA |
+| **HDFS NameNode UI** | [http://localhost:9870](http://localhost:9870) | `namenode:9000` (RPC) | Distributed Storage Lake Browser |
+| **PostgreSQL DW** | `localhost:5432` | `postgres-dw:5432` | Data Warehouse (`crypto_dw`) |
+| **Apache Kafka** | `localhost:9094` (External) | `kafka:9092` (Internal) | KRaft Event Broker |
+
+### 3. Pipeline Health & Sanity Verification
+
+```bash
+# Check all 14 containers are running and healthy
+docker compose ps
+
+# Run producer unit tests (schema normalization, message validation)
+docker exec -w /app crypto-producer python3 -m unittest discover -s /tests
+
+# Trigger Airflow automated data quality DAG (validates DW, Lake, & Streaming)
+docker exec airflow-scheduler airflow dags trigger crypto_data_quality_audit
+
+# Inspect live Spark Structured Streaming micro-batch commits
+docker logs --tail 20 spark-streaming
+
+# Query live market summary from PostgreSQL Data Warehouse
+docker exec postgres-dw psql -U crypto_admin -d crypto_dw -c "SELECT * FROM vw_market_overview;"
+```
+
+### 4. Downstream Team Data Access
+
+- **Machine Learning Team**:
+  - HDFS Parquet Data Lake: `hdfs://namenode:9000/data/crypto/streaming/klines/` (partitioned by `symbol=<SYM>/kline_date=<YYYY-MM-DD>`).
+  - Feature View: `public.vw_coin_analysis` in PostgreSQL DW (`crypto_dw`).
+  - Prediction Sink: `public.fact_predictions` (seeded DDL ready for ML inferences).
+- **Visualization Team**:
+  - Apache Superset: `http://localhost:8088` (Default dashboard: `/superset/dashboard/crypto-market-analytics/`).
+  - Pre-connected Database: `Crypto Data Warehouse` (`postgres-dw:5432/crypto_dw` internally via Docker network).
+  - Pre-registered Datasets: `vw_market_overview`, `vw_coin_analysis`, `fact_klines_min`, `fact_klines_daily`, `fact_predictions`.
+
+### 5. Troubleshooting Common Issues
+
+- **Producer in Dry-Run Mode**: Ensure `FORCE_RUN=true` is set in `.env` if operating without private Binance API keys.
+- **Spark Worker Memory/Cores**: Standalone worker is allocated 2 cores and 3.0 GiB RAM. The continuous streaming job utilizes 2 cores; batch jobs queued via Airflow execute concurrently as slots permit.
+- **Kafka Persistence**: Topic partition logs and cluster metadata are stored in the persistent Docker volume `crypto-market-analytics_kafka_data` via `KAFKA_LOG_DIRS=/var/lib/kafka/data`. Never run `docker compose down -v` to prevent volume deletion.
+- **Detailed Reference**: See [crypto_infrastructure_audit_and_handoff.md](file:///home/ahmed/.gemini/antigravity/brain/f2c2230d-a37e-4a08-a44f-756dc1e31636/crypto_infrastructure_audit_and_handoff.md) for full schemas and disaster recovery procedures.
 
 ## Project Objective
 

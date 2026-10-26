@@ -33,6 +33,7 @@ env/
 *.bak
 *.audit_backup
 *.pre_task_fix
+.kafka_logs_backup/
 
 # IDE & OS files
 .DS_Store

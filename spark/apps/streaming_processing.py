@@ -160,7 +160,7 @@ def run_streaming_pipeline(args: argparse.Namespace) -> None:
                 .save(hdfs_sink_path)
             )
 
-            # 2. Write to PostgreSQL DW if enabled
+            # 2. Write to PostgreSQL DW if enabled (Fail-closed idempotent anti-join)
             if args.enable_postgres:
                 pg_url = f"jdbc:postgresql://{args.postgres_host}:{args.postgres_port}/{args.postgres_db}"
                 pg_table = "fact_klines_min"
@@ -180,20 +180,37 @@ def run_streaming_pipeline(args: argparse.Namespace) -> None:
                 )
 
                 try:
-                    (
-                        pg_batch.write
-                        .format("jdbc")
+                    # Idempotent anti-join against existing keys to avoid duplicates on micro-batch retry
+                    existing_keys_df = (
+                        batch_df.sparkSession.read.format("jdbc")
                         .option("url", pg_url)
-                        .option("dbtable", pg_table)
+                        .option("dbtable", f"(SELECT open_time, symbol FROM {pg_table}) AS existing_keys")
                         .option("user", args.postgres_user)
                         .option("password", args.postgres_password)
                         .option("driver", "org.postgresql.Driver")
-                        .mode("append")
-                        .save()
+                        .load()
                     )
-                    logger.info("Micro-batch #%d successfully sinked to PostgreSQL table '%s'", batch_id, pg_table)
+                    df_to_insert = pg_batch.join(existing_keys_df, on=["open_time", "symbol"], how="left_anti")
+                    to_insert_count = df_to_insert.count()
+
+                    if to_insert_count > 0:
+                        (
+                            df_to_insert.write
+                            .format("jdbc")
+                            .option("url", pg_url)
+                            .option("dbtable", pg_table)
+                            .option("user", args.postgres_user)
+                            .option("password", args.postgres_password)
+                            .option("driver", "org.postgresql.Driver")
+                            .mode("append")
+                            .save()
+                        )
+                        logger.info("Micro-batch #%d successfully sinked %d records to PostgreSQL table '%s'", batch_id, to_insert_count, pg_table)
+                    else:
+                        logger.info("Micro-batch #%d: all %d records already present in PostgreSQL table '%s'", batch_id, record_count, pg_table)
                 except Exception as exc:
                     logger.error("PostgreSQL sink error in micro-batch #%d: %s", batch_id, exc)
+                    raise RuntimeError(f"PostgreSQL streaming sink failure in micro-batch #{batch_id}: {exc}") from exc
 
         # 5. Start Streaming Query
         writer = (
@@ -241,7 +258,11 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("KAFKA_TOPIC_STREAMING_KLINES", "crypto_klines_streaming"),
         help="Kafka real-time streaming topic",
     )
-    parser.add_argument("--starting-offsets", default="latest", help="Kafka starting offsets (latest or earliest)")
+    parser.add_argument(
+        "--starting-offsets",
+        default=os.environ.get("STREAMING_STARTING_OFFSETS", "latest"),
+        help="Kafka starting offsets (latest or earliest)",
+    )
 
     # HDFS
     parser.add_argument(
@@ -251,17 +272,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hdfs-output-path",
-        default="/data/crypto/streaming/klines",
+        default=os.environ.get("HDFS_STREAMING_OUTPUT", "/data/crypto/streaming/klines"),
         help="HDFS directory for real-time Parquet stream",
     )
     parser.add_argument(
         "--hdfs-checkpoint-path",
-        default="/data/crypto/checkpoints/streaming_klines",
+        default=os.environ.get("HDFS_STREAMING_CHECKPOINT", "/data/crypto/checkpoints/streaming_klines"),
         help="HDFS checkpoint directory",
     )
 
     # Trigger & Execution Mode
-    parser.add_argument("--trigger-interval", default="10 seconds", help="Micro-batch processing interval")
+    parser.add_argument(
+        "--trigger-interval",
+        default=os.environ.get("STREAMING_TRIGGER_INTERVAL", "10 seconds"),
+        help="Micro-batch processing interval",
+    )
     parser.add_argument(
         "--smoke-test",
         action="store_true",

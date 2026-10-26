@@ -101,6 +101,7 @@ with DAG(
         task_id="run_spark_historical_batch",
         bash_command=spark_submit_command,
         env={
+            "PATH": os.environ.get("PATH", "/home/airflow/.local/lib/python3.11/site-packages/pyspark/bin:/home/airflow/.local/bin:/usr/local/bin:/usr/bin:/bin"),
             "POSTGRES_DW_PASSWORD": os.environ.get("POSTGRES_DW_PASSWORD", "crypto_secure_password_123"),
             "POSTGRES_DW_USER": os.environ.get("POSTGRES_DW_USER", "crypto_admin"),
             "POSTGRES_DW_DB": os.environ.get("POSTGRES_DW_DB", "crypto_dw"),

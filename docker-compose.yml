@@ -28,6 +28,7 @@ volumes:
   kafka_data:
   postgres_dw_data:
   superset_home:
+  ivy_cache:
 
 services:
   # -------------------------------------------------------------------------
@@ -96,6 +97,52 @@ services:
       - ./spark/apps:/opt/spark-apps
     networks: [crypto-net]
 
+  # -------------------------------------------------------------------------
+  # Persistent Spark Structured Streaming Service
+  # -------------------------------------------------------------------------
+  spark-streaming:
+    image: crypto-airflow:local
+    container_name: spark-streaming
+    hostname: spark-streaming
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      kafka:
+        condition: service_started
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_healthy
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_TOPIC_STREAMING=${KAFKA_TOPIC_STREAMING_KLINES:-crypto_klines_streaming}
+      - HDFS_NAMENODE=${HDFS_NAMENODE:-hdfs://namenode:9000}
+      - HDFS_STREAMING_OUTPUT=/data/crypto/streaming/klines
+      - HDFS_STREAMING_CHECKPOINT=/data/crypto/checkpoints/streaming_klines_continuous
+      - STREAMING_TRIGGER_INTERVAL=${STREAMING_TRIGGER_INTERVAL:-10 seconds}
+      - STREAMING_STARTING_OFFSETS=${STREAMING_STARTING_OFFSETS:-latest}
+      - ENABLE_POSTGRES_STREAMING_SINK=${ENABLE_POSTGRES_STREAMING_SINK:-false}
+      - POSTGRES_DW_HOST=postgres-dw
+      - POSTGRES_DW_PORT=5432
+      - POSTGRES_DW_DB=crypto_dw
+      - POSTGRES_DW_USER=crypto_admin
+      - POSTGRES_DW_PASSWORD=${POSTGRES_DW_PASSWORD:-crypto_secure_password_123}
+      - SPARK_DRIVER_HOST=spark-streaming
+      - SPARK_DRIVER_PORT=7078
+      - SPARK_BLOCK_MANAGER_PORT=7079
+    entrypoint: ["/bin/bash", "/opt/spark/run_streaming.sh"]
+    ports:
+      - "${SPARK_STREAMING_UI_PORT:-4040}:4040"
+    volumes:
+      - ./spark/apps:/opt/spark-apps:ro
+      - ./spark/run_streaming.sh:/opt/spark/run_streaming.sh:ro
+      - ivy_cache:/home/airflow/.ivy2
+    networks: [crypto-net]
+
   jupyter:
     build:
       context: ./jupyter
@@ -139,6 +186,7 @@ services:
       - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
       - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
       - CLUSTER_ID=crypto-analytics-kraft-cluster-01
+      - KAFKA_LOG_DIRS=/var/lib/kafka/data
     ports:
       - "${KAFKA_INTERNAL_PORT}:9092"
       - "${KAFKA_EXTERNAL_PORT}:9094"
@@ -184,6 +232,7 @@ services:
         condition: service_completed_successfully
     environment:
       - RUN_MODE=${RUN_MODE:-streaming}
+      - FORCE_RUN=${FORCE_RUN:-false}
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
       - KAFKA_TOPIC_HISTORICAL_KLINES=${KAFKA_TOPIC_HISTORICAL_KLINES:-crypto_klines_historical}
       - KAFKA_TOPIC_STREAMING_KLINES=${KAFKA_TOPIC_STREAMING_KLINES:-crypto_klines_streaming}
@@ -258,6 +307,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ./spark/apps:/opt/spark-apps:ro
+      - ivy_cache:/home/airflow/.ivy2
     networks: [crypto-net]
 
   airflow-scheduler:
@@ -279,6 +329,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ./spark/apps:/opt/spark-apps:ro
+      - ivy_cache:/home/airflow/.ivy2
     networks: [crypto-net]
 
   # -------------------------------------------------------------------------
