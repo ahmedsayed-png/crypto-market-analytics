@@ -8,16 +8,67 @@ set -e
 echo "Running Superset DB migrations..."
 superset db upgrade
 
-echo "Ensuring admin user exists..."
-superset fab create-admin \
-    --username "${SUPERSET_ADMIN_USER:-admin}" \
-    --firstname Admin \
-    --lastname User \
-    --email "${SUPERSET_ADMIN_EMAIL:-admin@example.com}" \
-    --password "${SUPERSET_ADMIN_PASSWORD:-admin}" || echo "Admin user already exists, continuing."
-
 echo "Initializing Superset roles/permissions..."
 superset init
+
+echo "Ensuring initial admin user exists with Admin role..."
+python3 - <<'PYEOF'
+import os
+import sys
+from superset.app import create_app
+
+admin_username = os.environ.get("SUPERSET_ADMIN_USERNAME") or os.environ.get("SUPERSET_ADMIN_USER") or "admin"
+admin_password = os.environ.get("SUPERSET_ADMIN_PASSWORD") or "admin"
+admin_email = os.environ.get("SUPERSET_ADMIN_EMAIL") or "admin@example.com"
+
+app = create_app()
+with app.app_context():
+    sm = app.appbuilder.sm
+
+    admin_role = sm.find_role("Admin")
+    if not admin_role:
+        print("Admin role not found, creating Admin role...")
+        admin_role = sm.add_role("Admin")
+        if not admin_role:
+            print("ERROR: Failed to create Admin role", file=sys.stderr)
+            sys.exit(1)
+
+    user = sm.find_user(username=admin_username)
+    if user:
+        print(f"Admin user '{admin_username}' already exists. Preserving existing password and credentials.")
+        user_roles = [r.name for r in user.roles]
+        if "Admin" not in user_roles:
+            print(f"Assigning Admin role to existing user '{admin_username}'...")
+            user.roles.append(admin_role)
+            sm.update_user(user)
+            print(f"Admin role successfully assigned to '{admin_username}'.")
+        else:
+            print(f"User '{admin_username}' already possesses Admin role.")
+    else:
+        print(f"Creating initial admin user '{admin_username}' with Admin role...")
+        new_user = sm.add_user(
+            username=admin_username,
+            first_name="Admin",
+            last_name="User",
+            email=admin_email,
+            role=admin_role,
+            password=admin_password,
+        )
+        if not new_user:
+            print(f"ERROR: Failed to create admin user '{admin_username}'", file=sys.stderr)
+            sys.exit(1)
+        print(f"Admin user '{admin_username}' created successfully.")
+
+    # Verification
+    user = sm.find_user(username=admin_username)
+    if not user:
+        print(f"ERROR: Verification failed, user '{admin_username}' not found after creation.", file=sys.stderr)
+        sys.exit(1)
+    if "Admin" not in [r.name for r in user.roles]:
+        print(f"ERROR: Verification failed, user '{admin_username}' missing Admin role.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Verified: Admin user '{admin_username}' is active with Admin role.")
+PYEOF
 
 echo "Registering the Crypto Data Warehouse database connection..."
 python3 - <<'PYEOF'

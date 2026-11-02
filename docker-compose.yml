@@ -368,10 +368,12 @@ services:
         condition: service_completed_successfully
     environment:
       - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+      - SUPERSET_ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME:-${SUPERSET_ADMIN_USER:-admin}}
     ports:
       - "${SUPERSET_PORT}:8088"
     volumes:
       - superset_home:/app/superset_home
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     networks: [crypto-net]
 
   superset-init:
@@ -384,9 +386,10 @@ services:
     depends_on: [postgres-dw]
     environment:
       - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
-      - SUPERSET_ADMIN_USER=${SUPERSET_ADMIN_USER}
-      - SUPERSET_ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD}
-      - SUPERSET_ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL}
+      - SUPERSET_ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME:-${SUPERSET_ADMIN_USER:-admin}}
+      - SUPERSET_ADMIN_USER=${SUPERSET_ADMIN_USER:-${SUPERSET_ADMIN_USERNAME:-admin}}
+      - SUPERSET_ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD:-admin}
+      - SUPERSET_ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL:-admin@example.com}
       - POSTGRES_DW_DB=${POSTGRES_DW_DB}
       - POSTGRES_DW_USER=${POSTGRES_DW_USER}
       - POSTGRES_DW_PASSWORD=${POSTGRES_DW_PASSWORD}
@@ -394,4 +397,5 @@ services:
     volumes:
       - superset_home:/app/superset_home
       - ./superset/bootstrap.sh:/app/bootstrap.sh:ro
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
     networks: [crypto-net]
