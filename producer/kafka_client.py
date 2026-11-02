@@ -17,8 +17,12 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
+try:
+    from kafka import KafkaProducer
+    from kafka.errors import KafkaError
+except ImportError:
+    KafkaProducer = None
+    KafkaError = Exception
 
 from config import CONFIG
 from schema import validate_kline_dict
@@ -36,6 +40,8 @@ class CryptoKafkaProducer:
     """
 
     def __init__(self) -> None:
+        if KafkaProducer is None:
+            raise RuntimeError("kafka-python is not installed in the current Python environment")
         cfg = CONFIG.kafka
         self._producer = KafkaProducer(
             bootstrap_servers=cfg.bootstrap_servers,

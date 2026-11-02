@@ -27,6 +27,7 @@ from typing import Dict, Any, Optional, Tuple
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    BooleanType,
     DoubleType,
     LongType,
     StringType,
@@ -42,20 +43,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spark_historical_processing")
 
-# Canonical 12-field Kline schema + lineage metadata
+# Canonical Unified Kline schema + lineage metadata
 CANONICAL_KLINE_SPARK_SCHEMA = StructType([
-    StructField("open_time", LongType(), True),
     StructField("symbol", StringType(), True),
+    StructField("interval", StringType(), True),
+    StructField("open_time", LongType(), True),
+    StructField("close_time", LongType(), True),
     StructField("open", DoubleType(), True),
     StructField("high", DoubleType(), True),
     StructField("low", DoubleType(), True),
     StructField("close", DoubleType(), True),
     StructField("volume", DoubleType(), True),
-    StructField("close_time", LongType(), True),
+    StructField("quote_volume", DoubleType(), True),
     StructField("quote_asset_volume", DoubleType(), True),
     StructField("number_of_trades", LongType(), True),
+    StructField("taker_buy_volume", DoubleType(), True),
     StructField("taker_buy_base_volume", DoubleType(), True),
     StructField("taker_buy_quote_volume", DoubleType(), True),
+    StructField("is_closed", BooleanType(), True),
+    StructField("event_time", LongType(), True),
+    StructField("source", StringType(), True),
     StructField("data_source", StringType(), True),
     StructField("ingested_at", StringType(), True),
 ])
@@ -381,6 +388,7 @@ def run_batch_job(args: argparse.Namespace) -> Dict[str, Any]:
         # 5. Extract Valid Fields and Normalize Types
         df_valid = df_valid_raw.select(
             F.upper(F.trim(F.col("kline.symbol"))).alias("symbol"),
+            F.coalesce(F.col("kline.interval"), F.lit("1m")).alias("interval"),
             F.col("kline.open_time"),
             (F.col("kline.open_time") / 1000.0).cast(TimestampType()).alias("open_time_dt"),
             F.col("kline.open"),
@@ -390,11 +398,15 @@ def run_batch_job(args: argparse.Namespace) -> Dict[str, Any]:
             F.col("kline.volume"),
             F.col("kline.close_time"),
             (F.col("kline.close_time") / 1000.0).cast(TimestampType()).alias("close_time_dt"),
-            F.col("kline.quote_asset_volume"),
+            F.coalesce(F.col("kline.quote_volume"), F.col("kline.quote_asset_volume")).alias("quote_volume"),
+            F.coalesce(F.col("kline.quote_asset_volume"), F.col("kline.quote_volume")).alias("quote_asset_volume"),
             F.col("kline.number_of_trades"),
-            F.col("kline.taker_buy_base_volume"),
+            F.coalesce(F.col("kline.taker_buy_volume"), F.col("kline.taker_buy_base_volume")).alias("taker_buy_volume"),
+            F.coalesce(F.col("kline.taker_buy_base_volume"), F.col("kline.taker_buy_volume")).alias("taker_buy_base_volume"),
             F.col("kline.taker_buy_quote_volume"),
-            F.coalesce(F.col("kline.data_source"), F.lit("historical")).alias("data_source"),
+            F.coalesce(F.col("kline.is_closed"), F.lit(True)).alias("is_closed"),
+            F.coalesce(F.col("kline.event_time"), F.col("kline.close_time")).alias("event_time"),
+            F.coalesce(F.col("kline.source"), F.col("kline.data_source"), F.lit("historical")).alias("data_source"),
             F.current_timestamp().alias("processed_at"),
         ).withColumn("kline_date", F.to_date(F.col("open_time_dt")))
 

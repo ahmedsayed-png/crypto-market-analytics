@@ -247,6 +247,8 @@ services:
       - BINANCE_WS_URL=${BINANCE_WS_URL}
     volumes:
       - ./producer:/app
+      - ./kafka:/app/kafka:ro
+      - ./tests:/app/tests:ro
     networks: [crypto-net]
 
   # -------------------------------------------------------------------------
@@ -307,6 +309,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ./spark/apps:/opt/spark-apps:ro
+      - ./producer:/opt/airflow/producer:ro
       - ivy_cache:/home/airflow/.ivy2
     networks: [crypto-net]
 
@@ -329,6 +332,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ./spark/apps:/opt/spark-apps:ro
+      - ./producer:/opt/airflow/producer:ro
       - ivy_cache:/home/airflow/.ivy2
     networks: [crypto-net]
 

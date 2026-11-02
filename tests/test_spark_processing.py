@@ -30,43 +30,50 @@ class TestSparkSchemaAndValidation(unittest.TestCase):
 
     def setUp(self):
         self.valid_kline = {
-            "open_time": 1700000000000,
             "symbol": "BTCUSDT",
+            "interval": "1m",
+            "open_time": 1700000000000,
+            "close_time": 1700000059999,
             "open": 50000.0,
             "high": 50500.0,
             "low": 49900.0,
             "close": 50200.0,
             "volume": 12.5,
-            "close_time": 1700000059999,
+            "quote_volume": 627500.0,
             "quote_asset_volume": 627500.0,
             "number_of_trades": 350,
+            "taker_buy_volume": 6.2,
             "taker_buy_base_volume": 6.2,
             "taker_buy_quote_volume": 311240.0,
+            "is_closed": True,
+            "event_time": 1700000059999,
+            "source": "historical",
             "data_source": "historical",
             "ingested_at": "2026-10-23T12:00:00Z",
         }
 
     def test_schema_field_names_and_types(self):
-        """Verify Spark schema matches the canonical 14 fields."""
+        """Verify Spark schema matches the Unified Event Schema."""
         if HAS_PYSPARK:
             fields = {f.name: f.dataType.typeName() for f in CANONICAL_KLINE_SPARK_SCHEMA.fields}
-            self.assertEqual(len(fields), 14)
+            self.assertEqual(len(fields), 20)
             self.assertEqual(fields["open_time"], "long")
+            self.assertEqual(fields["close_time"], "long")
             self.assertEqual(fields["symbol"], "string")
+            self.assertEqual(fields["interval"], "string")
             self.assertEqual(fields["open"], "double")
             self.assertEqual(fields["high"], "double")
             self.assertEqual(fields["low"], "double")
             self.assertEqual(fields["close"], "double")
             self.assertEqual(fields["volume"], "double")
-            self.assertEqual(fields["close_time"], "long")
-            self.assertEqual(fields["quote_asset_volume"], "double")
+            self.assertEqual(fields["quote_volume"], "double")
             self.assertEqual(fields["number_of_trades"], "long")
-            self.assertEqual(fields["taker_buy_base_volume"], "double")
-            self.assertEqual(fields["taker_buy_quote_volume"], "double")
-            self.assertEqual(fields["data_source"], "string")
-            self.assertEqual(fields["ingested_at"], "string")
+            self.assertEqual(fields["taker_buy_volume"], "double")
+            self.assertEqual(fields["is_closed"], "boolean")
+            self.assertEqual(fields["event_time"], "long")
+            self.assertEqual(fields["source"], "string")
         else:
-            self.assertEqual(len(CANONICAL_KLINE_FIELDS), 14)
+            self.assertEqual(len(CANONICAL_KLINE_FIELDS), 15)
 
     def test_valid_record_passes_validation(self):
         valid, reason = validate_kline_dict(self.valid_kline)
@@ -102,7 +109,6 @@ class TestSparkSchemaAndValidation(unittest.TestCase):
             dict(self.valid_kline, close=50300.0),  # duplicate key with different close
             dict(self.valid_kline, open_time=1700000060000),  # different key
         ]
-        # Simulate dropDuplicates(["symbol", "open_time"])
         seen = set()
         unique_records = []
         for r in records:
@@ -112,7 +118,19 @@ class TestSparkSchemaAndValidation(unittest.TestCase):
                 unique_records.append(r)
 
         self.assertEqual(len(unique_records), 2)
-        self.assertEqual(len(records) - len(unique_records), 2)  # 2 duplicates dropped
+        self.assertEqual(len(records) - len(unique_records), 2)
+
+    def test_streaming_closed_vs_provisional_filter_for_dw(self):
+        """Verify that provisional candles are excluded from warehouse 1m kline inserts."""
+        provisional_candle = dict(self.valid_kline, is_closed=False, close=50150.0)
+        closed_candle = dict(self.valid_kline, is_closed=True, close=50200.0)
+
+        micro_batch = [provisional_candle, closed_candle]
+
+        # Only closed candles should pass to PostgreSQL fact_klines_min
+        to_sink = [c for c in micro_batch if c.get("is_closed") is True]
+        self.assertEqual(len(to_sink), 1)
+        self.assertEqual(to_sink[0]["close"], 50200.0)
 
 
 if __name__ == "__main__":

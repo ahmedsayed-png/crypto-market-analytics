@@ -33,7 +33,7 @@ except ImportError:
     print("Run this tool inside Docker: docker run --rm --network crypto-net -v $(pwd):/app -w /app crypto-producer:local python kafka/tools.py ...", file=sys.stderr)
     sys.exit(1)
 
-from schema import CanonicalKlineMessage, validate_kline_dict
+from schema import CanonicalKlineMessage, generate_kline_key, validate_kline_dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -142,22 +142,31 @@ def publish_test_message(
     topic: str,
     symbol: str = "BTCUSDT",
     data_source: str = "historical",
+    interval: str = "1m",
+    is_closed: bool = True,
 ) -> Dict[str, Any]:
-    """Publish a validated canonical Kline message to Kafka."""
-    print(f"\nPublishing test canonical message to topic '{topic}' (symbol={symbol}, source={data_source})...")
+    """Publish a validated canonical Unified Event Schema Kline message to Kafka."""
+    print(f"\nPublishing test canonical message to topic '{topic}' (symbol={symbol}, interval={interval}, source={data_source}, is_closed={is_closed})...")
 
     now_ms = int(time.time() * 1000)
+    open_ms = now_ms - 60000
     canonical = CanonicalKlineMessage(
-        open_time=now_ms - 60000,
         symbol=symbol.upper(),
+        interval=interval,
+        open_time=open_ms,
+        close_time=now_ms,
         open=65000.50,
         high=65120.00,
         low=64980.25,
         close=65050.75,
         volume=12.4501,
-        close_time=now_ms,
-        quote_asset_volume=809881.85,
+        quote_volume=809881.85,
         number_of_trades=425,
+        taker_buy_volume=6.1200,
+        is_closed=is_closed,
+        event_time=now_ms,
+        source=data_source,
+        quote_asset_volume=809881.85,
         taker_buy_base_volume=6.1200,
         taker_buy_quote_volume=398100.10,
         data_source=data_source,
@@ -178,14 +187,15 @@ def publish_test_message(
     )
 
     try:
-        future = producer.send(topic, value=msg_dict, key=symbol.upper())
+        msg_key = generate_kline_key(symbol, interval, open_ms)
+        future = producer.send(topic, value=msg_dict, key=msg_key)
         record_metadata = future.get(timeout=10)
         producer.flush()
         print(f"✓ Message successfully delivered:")
         print(f"  Topic:     {record_metadata.topic}")
         print(f"  Partition: {record_metadata.partition}")
         print(f"  Offset:    {record_metadata.offset}")
-        print(f"  Key:       {symbol.upper()}")
+        print(f"  Key:       {msg_key}")
         print(f"  Timestamp: {record_metadata.timestamp}")
         return msg_dict
     finally:

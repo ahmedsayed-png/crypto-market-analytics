@@ -109,6 +109,13 @@ class HistoricalConfig:
     lookback_days: int = field(
         default_factory=lambda: int(os.environ.get("HISTORICAL_LOOKBACK_DAYS", "365"))
     )
+    # Optional start and end timestamps in ms (or parse from ISO string / env vars)
+    start_time: Optional[int] = field(
+        default_factory=lambda: int(os.environ["HISTORICAL_START_TIME"]) if os.environ.get("HISTORICAL_START_TIME") else None
+    )
+    end_time: Optional[int] = field(
+        default_factory=lambda: int(os.environ["HISTORICAL_END_TIME"]) if os.environ.get("HISTORICAL_END_TIME") else None
+    )
     # Optional max batches limit per symbol (useful for safe small test runs)
     max_batches: Optional[int] = field(
         default_factory=lambda: int(os.environ["HISTORICAL_MAX_BATCHES"]) if os.environ.get("HISTORICAL_MAX_BATCHES") else None
@@ -122,20 +129,28 @@ class HistoricalConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class StreamingConfig:
-    # Same target pairs as historical
-    symbols: List[str] = field(default_factory=lambda: [
-        "btcusdt", "ethusdt", "bnbusdt", "solusdt", "xrpusdt",
-        "adausdt", "dogeusdt", "avaxusdt", "dotusdt", "linkusdt",
-        "ltcusdt", "trxusdt", "shibusdt", "atomusdt", "uniusdt",
-        "etcusdt", "filusdt", "aptusdt", "nearusdt", "maticusdt",
-    ])
+    # Target pairs for real-time streaming (override via STREAMING_SYMBOLS env var)
+    symbols: List[str] = field(default_factory=lambda: (
+        [s.strip().lower() for s in os.environ.get("STREAMING_SYMBOLS").split(",") if s.strip()]
+        if os.environ.get("STREAMING_SYMBOLS")
+        else [
+            "btcusdt", "ethusdt", "bnbusdt", "solusdt", "xrpusdt",
+            "adausdt", "dogeusdt", "avaxusdt", "dotusdt", "linkusdt",
+            "ltcusdt", "trxusdt", "shibusdt", "atomusdt", "uniusdt",
+            "etcusdt", "filusdt", "aptusdt", "nearusdt", "maticusdt",
+        ]
+    ))
     # Stream types to subscribe to
-    kline_interval: str = "1m"         # for @kline streams
+    kline_interval: str = field(
+        default_factory=lambda: os.environ.get("STREAMING_KLINE_INTERVAL", "1m")
+    )
     depth_levels: int = 20             # for @depth20 partial book
     # WebSocket reconnect settings
     max_reconnect_attempts: int = 10
     reconnect_delay_seconds: float = 5.0
     ping_interval: int = 30            # seconds
+    # Connection heartbeat watchdog threshold (seconds without event before warning/reconnect)
+    watchdog_timeout_seconds: float = 60.0
     # data_source tag attached to every produced message
     data_source: str = "realtime"
 

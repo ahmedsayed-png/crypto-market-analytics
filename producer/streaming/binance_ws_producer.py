@@ -1,28 +1,31 @@
 """
 ==============================================================================
 producer/streaming/binance_ws_producer.py
-Real-Time Streaming — Binance WebSocket → Kafka
+Real-Time Streaming — Binance WebSocket -> Kafka (crypto_klines_streaming)
 
 Flow
 ----
   Binance Combined Stream WebSocket:
     wss://stream.binance.com:9443/stream?streams=
-        <symbol>@aggTrade / <symbol>@kline_1m / <symbol>@depth20 / <symbol>@ticker
+        <symbol>@aggTrade / <symbol>@kline_<interval> / <symbol>@depth20 / <symbol>@ticker
       ↓
-  Normalise & enrich with metadata (data_source="realtime")
+  Normalise & enrich with Unified Event Schema (source="realtime", is_closed=x)
       ↓
   Kafka topics:
-      market_trades        — aggregated trade stream (@aggTrade)
-      market_klines        — real-time kline updates  (@kline_1m)
-      order_book_events    — partial order book (20 levels) (@depth20)
-      ticker_events        — 24-hour rolling ticker  (@ticker)
+      crypto_klines_streaming — real-time kline updates (both provisional and closed)
+      market_trades           — aggregated trade stream (@aggTrade)
+      order_book_events       — partial order book (20 levels) (@depth20)
+      ticker_events           — 24-hour rolling ticker (@ticker)
 
 Usage
 -----
   python producer/streaming/binance_ws_producer.py
 
-The script will be activated when the team is ready to stream real-time data.
-No WebSocket connections are opened simply by importing this module.
+The script handles:
+  - Connection interruptions & exponential backoff reconnection.
+  - Heartbeat / ping-pong monitoring.
+  - Distinction between provisional (in-progress) and finalized (closed) candles.
+  - Composite partition keys: <symbol>_<interval>_<open_time>.
 ==============================================================================
 """
 
@@ -36,27 +39,38 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
-import websocket
-from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_fixed
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# ---------------------------------------------------------------------------
-# Bootstrap
-# ---------------------------------------------------------------------------
-load_dotenv()
+try:
+    import websocket
+except ImportError:
+    websocket = None
+
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential
+except ImportError:
+    def retry(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
+    def stop_after_attempt(*args, **kwargs): return None
+    def wait_exponential(*args, **kwargs): return None
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from config import CONFIG
 from kafka_client import get_kafka_producer
-from schema import normalise_ws_kline, validate_kline_dict
+from schema import generate_kline_key, normalise_ws_kline, validate_kline_dict
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 logger = logging.getLogger("streaming_producer")
-
 
 # ---------------------------------------------------------------------------
 # Graceful shutdown flag
@@ -65,7 +79,7 @@ _shutdown_event = threading.Event()
 
 
 def _handle_signal(sig, frame) -> None:
-    logger.info("Shutdown signal received (%s). Closing WebSocket...", sig)
+    logger.info("Shutdown signal received (%s). Closing WebSocket cleanly...", sig)
     _shutdown_event.set()
 
 
@@ -74,19 +88,21 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 
 # ---------------------------------------------------------------------------
-# Normalisation helpers  (data_source = "realtime")
+# Normalisation helpers
 # ---------------------------------------------------------------------------
 
 def _base_metadata(symbol: str) -> Dict:
     return {
-        "symbol": symbol.upper(),
-        "data_source": CONFIG.streaming.data_source,   # "realtime"
+        "symbol": symbol.strip().upper(),
+        "source": CONFIG.streaming.data_source,  # "realtime"
+        "data_source": CONFIG.streaming.data_source,
         "received_at": datetime.now(tz=timezone.utc).isoformat(),
+        "ingested_at": datetime.now(tz=timezone.utc).isoformat(),
     }
 
 
 def normalise_agg_trade(data: Dict) -> Optional[Dict]:
-    """@aggTrade stream → market_trades topic."""
+    """@aggTrade stream -> market_trades topic."""
     symbol = data.get("s", "")
     return {
         **_base_metadata(symbol),
@@ -100,13 +116,13 @@ def normalise_agg_trade(data: Dict) -> Optional[Dict]:
     }
 
 
-def normalise_kline(data: Dict) -> Optional[Dict]:
-    """@kline_<interval> stream → canonical crypto_klines_streaming format."""
-    return normalise_ws_kline(data)
+def normalise_kline(data: Dict, default_interval: str = "1m") -> Optional[Dict]:
+    """@kline_<interval> stream -> Unified Event Schema format."""
+    return normalise_ws_kline(data, default_interval=default_interval)
 
 
 def normalise_depth(data: Dict, symbol: str) -> Optional[Dict]:
-    """@depth<levels> stream → order_book_events topic."""
+    """@depth<levels> stream -> order_book_events topic."""
     return {
         **_base_metadata(symbol),
         "last_update_id": data.get("lastUpdateId"),
@@ -117,7 +133,7 @@ def normalise_depth(data: Dict, symbol: str) -> Optional[Dict]:
 
 
 def normalise_ticker(data: Dict) -> Optional[Dict]:
-    """@ticker stream → ticker_events topic."""
+    """@ticker stream -> ticker_events topic."""
     symbol = data.get("s", "")
     return {
         **_base_metadata(symbol),
@@ -147,36 +163,58 @@ class StreamRouter:
     based on the stream name embedded in the combined-stream payload.
     """
 
-    _STREAM_HANDLERS: Dict[str, Callable] = {}
-
     def __init__(self, producer) -> None:
         self._producer = producer
+        self.kline_events_count = 0
+        self.closed_klines_count = 0
 
     def route(self, raw_message: str) -> None:
-        """Parse *raw_message* and dispatch to the appropriate handler."""
+        """Parse raw_message and dispatch to the appropriate handler."""
         try:
             envelope = json.loads(raw_message)
             stream_name: str = envelope.get("stream", "")
             data: Dict = envelope.get("data", {})
-            event_type: str = data.get("e", "")
 
-            if "aggTrade" in stream_name:
-                self._handle_agg_trade(data)
-            elif "kline" in stream_name:
+            if "kline" in stream_name:
                 self._handle_kline(data)
+            elif "aggTrade" in stream_name:
+                self._handle_agg_trade(data)
             elif "depth" in stream_name:
-                # Extract symbol from stream name: "btcusdt@depth20" → "BTCUSDT"
                 symbol = stream_name.split("@")[0].upper()
                 self._handle_depth(data, symbol)
             elif "ticker" in stream_name:
                 self._handle_ticker(data)
             else:
-                logger.debug("Unknown stream: %s", stream_name)
+                logger.debug("Unknown stream type: %s", stream_name)
 
         except (json.JSONDecodeError, KeyError) as exc:
             logger.warning("Failed to parse stream message: %s", exc)
 
     # ------------------------------------------------------------------
+
+    def _handle_kline(self, data: Dict) -> None:
+        msg = normalise_kline(data, default_interval=CONFIG.streaming.kline_interval)
+        if msg:
+            self.kline_events_count += 1
+            if msg.get("is_closed"):
+                self.closed_klines_count += 1
+                logger.info(
+                    "[%s] Closed candle: open_time=%d close=%.2f volume=%.4f (closed total: %d)",
+                    msg["symbol"], msg["open_time"], msg["close"], msg["volume"], self.closed_klines_count,
+                )
+            else:
+                logger.debug(
+                    "[%s] Provisional update: open_time=%d close=%.2f",
+                    msg["symbol"], msg["open_time"], msg["close"],
+                )
+
+            key = generate_kline_key(msg["symbol"], msg.get("interval", "1m"), msg["open_time"])
+            self._producer.send_message(
+                topic=CONFIG.kafka.topic_streaming_klines,
+                payload=msg,
+                key=key,
+                validate=True,
+            )
 
     def _handle_agg_trade(self, data: Dict) -> None:
         msg = normalise_agg_trade(data)
@@ -185,16 +223,6 @@ class StreamRouter:
                 topic=CONFIG.kafka.topic_trades,
                 payload=msg,
                 key=msg.get("symbol"),
-            )
-
-    def _handle_kline(self, data: Dict) -> None:
-        msg = normalise_kline(data)
-        if msg:
-            self._producer.send_message(
-                topic=CONFIG.kafka.topic_streaming_klines,
-                payload=msg,
-                key=msg.get("symbol"),
-                validate=True,
             )
 
     def _handle_depth(self, data: Dict, symbol: str) -> None:
@@ -220,24 +248,23 @@ class StreamRouter:
 # WebSocket client
 # ---------------------------------------------------------------------------
 
-def _build_stream_url(symbols: list) -> str:
+def build_stream_url(symbols: list, interval: str = "1m", depth: int = 20) -> str:
     """
     Build a Binance combined stream URL subscribing to:
-      @aggTrade, @kline_1m, @depth20, @ticker
+      @kline_<interval>, @aggTrade, @depth<depth>, @ticker
     for every symbol in *symbols*.
     """
     streams = []
-    interval = CONFIG.streaming.kline_interval
-    depth = CONFIG.streaming.depth_levels
-
     for sym in symbols:
-        streams.append(f"{sym}@aggTrade")
-        streams.append(f"{sym}@kline_{interval}")
-        streams.append(f"{sym}@depth{depth}")
-        streams.append(f"{sym}@ticker")
+        sym_lower = sym.strip().lower()
+        streams.append(f"{sym_lower}@kline_{interval}")
+        streams.append(f"{sym_lower}@aggTrade")
+        streams.append(f"{sym_lower}@depth{depth}")
+        streams.append(f"{sym_lower}@ticker")
 
     combined = "/".join(streams)
-    return f"{CONFIG.binance.ws_base_url.rstrip('/ws')}/stream?streams={combined}"
+    base_ws = CONFIG.binance.ws_base_url.rstrip("/ws")
+    return f"{base_ws}/stream?streams={combined}"
 
 
 class BinanceWebSocketProducer:
@@ -246,36 +273,45 @@ class BinanceWebSocketProducer:
     Auto-reconnects on disconnect with exponential back-off via tenacity.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, symbols: Optional[list] = None, interval: Optional[str] = None) -> None:
         self._producer = get_kafka_producer()
         self._router = StreamRouter(self._producer)
-        self._url = _build_stream_url(CONFIG.streaming.symbols)
+        self._symbols = symbols or CONFIG.streaming.symbols
+        self._interval = interval or CONFIG.streaming.kline_interval
+        self._url = build_stream_url(self._symbols, self._interval, CONFIG.streaming.depth_levels)
         self._ws: Optional[websocket.WebSocketApp] = None
+        self.last_message_time: float = time.time()
+        self.connected_at: Optional[float] = None
 
     # ------------------------------------------------------------------
 
     def _on_message(self, ws: Any, raw: str) -> None:
+        self.last_message_time = time.time()
         self._router.route(raw)
 
     def _on_error(self, ws: Any, error: Exception) -> None:
-        logger.error("WebSocket error: %s", error)
+        logger.error("WebSocket connection error: %s", error)
 
     def _on_close(self, ws: Any, close_status_code: Any, close_msg: Any) -> None:
         logger.warning(
-            "WebSocket closed — status=%s msg=%s", close_status_code, close_msg
+            "WebSocket closed — status=%s msg=%s (active duration: %.1fs)",
+            close_status_code, close_msg,
+            (time.time() - self.connected_at) if self.connected_at else 0.0,
         )
 
     def _on_open(self, ws: Any) -> None:
+        self.connected_at = time.time()
+        self.last_message_time = time.time()
         logger.info(
-            "WebSocket connected — streaming %d symbols × 4 stream types",
-            len(CONFIG.streaming.symbols),
+            "WebSocket successfully connected — streaming %d symbols at %s interval",
+            len(self._symbols), self._interval,
         )
 
     # ------------------------------------------------------------------
 
     @retry(
         stop=stop_after_attempt(CONFIG.streaming.max_reconnect_attempts),
-        wait=wait_fixed(CONFIG.streaming.reconnect_delay_seconds),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
         reraise=True,
     )
     def _connect_and_run(self) -> None:
@@ -294,22 +330,27 @@ class BinanceWebSocketProducer:
             ping_timeout=10,
         )
         if not _shutdown_event.is_set():
-            raise ConnectionError("WebSocket disconnected — triggering reconnect")
+            raise ConnectionError("WebSocket disconnected — triggering reconnect with exponential backoff")
 
     def run(self) -> None:
         """Start the WebSocket consumer loop (blocking until shutdown)."""
         logger.info(
-            "Starting real-time streaming producer — %d symbols",
-            len(CONFIG.streaming.symbols),
+            "Starting real-time streaming producer — %d symbols (target topic: %s)",
+            len(self._symbols),
+            CONFIG.kafka.topic_streaming_klines,
         )
         try:
             self._connect_and_run()
         except Exception as exc:
-            logger.critical("WebSocket permanently failed: %s", exc)
+            logger.critical("WebSocket permanently failed or interrupted: %s", exc)
         finally:
             self._producer.flush()
             self._producer.close()
-            logger.info("Streaming producer shut down cleanly.")
+            logger.info(
+                "Streaming producer shut down cleanly (processed %d klines, %d closed).",
+                self._router.kline_events_count,
+                self._router.closed_klines_count,
+            )
 
     def stop(self) -> None:
         """Signal graceful shutdown."""
@@ -328,9 +369,11 @@ if __name__ == "__main__":
 
     if not has_custom_key and not force_run:
         logger.warning(
-            "DRY RUN MODE — BINANCE_API_KEY is not set. "
-            "To test public market WebSocket streams without an API key, set FORCE_RUN=true. "
-            "Set BINANCE_API_KEY in .env for authenticated requests."
+            "========================================================\n"
+            "  DRY RUN MODE — BINANCE_API_KEY is not set.\n"
+            "  To test public market WebSocket streams without an API key, set FORCE_RUN=true.\n"
+            "  Set BINANCE_API_KEY in .env for authenticated requests.\n"
+            "========================================================"
         )
     else:
         ws_producer = BinanceWebSocketProducer()

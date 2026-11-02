@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS fact_klines_min (
     number_of_trades        BIGINT NOT NULL,
     taker_buy_volume        NUMERIC(24, 8) NOT NULL,
     taker_buy_quote_volume  NUMERIC(24, 8) NOT NULL,
-    processed_at            TIMESTAMP DEFAULT NOW()
+    processed_at            TIMESTAMP DEFAULT NOW(),
+    CONSTRAINT uq_fact_klines_min_symbol_time UNIQUE (symbol, open_time)
 );
 
 CREATE INDEX IF NOT EXISTS idx_klines_min_time_symbol ON fact_klines_min (open_time DESC, symbol);
